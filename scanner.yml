@@ -1,0 +1,50 @@
+name: Scanner Errori Prezzo Amazon
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"   # ogni 15 minuti
+  workflow_dispatch:          # avvio manuale dal sito GitHub
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache dipendenze pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+
+      - name: Installa dipendenze
+        run: pip install -r requirements.txt
+
+      - name: Ripristina database
+        uses: actions/cache@v4
+        with:
+          path: prezzi.db
+          key: prezzi-db-${{ github.run_id }}
+          restore-keys: |
+            prezzi-db-
+
+      - name: Esegui scanner
+        env:
+          AMAZON_PARTNER_TAG: ${{ secrets.AMAZON_PARTNER_TAG }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python bot.py
+
+      - name: Salva database aggiornato
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: prezzi.db
+          key: prezzi-db-${{ github.run_id }}
