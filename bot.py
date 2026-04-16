@@ -14,7 +14,7 @@ AMAZON_PARTNER_TAG = os.environ["AMAZON_PARTNER_TAG"]   # es. tuotag-21
 TELEGRAM_TOKEN     = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID   = os.environ["TELEGRAM_CHAT_ID"]     # es. @nomedelcanale
 
-SOGLIA_SCONTO = 50   # pubblica solo sconti >= 50%
+SOGLIA_SCONTO = 10   # pubblica solo sconti >= 50%
 
 DB_PATH = "prezzi.db"
 
