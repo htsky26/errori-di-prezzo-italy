@@ -1,3 +1,4 @@
+
 import os
 import sqlite3
 import requests
@@ -13,24 +14,13 @@ AMAZON_PARTNER_TAG = os.environ["AMAZON_PARTNER_TAG"]
 TELEGRAM_TOKEN     = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID   = os.environ["TELEGRAM_CHAT_ID"]
 
-SOGLIA_SCONTO = 30  # pubblica sconti >= 30%
 DB_PATH = "prezzi.db"
-
 RAPIDAPI_HOST = "axesso-axesso-amazon-data-service-v1.p.rapidapi.com"
 
 HEADERS_RAPID = {
     "x-rapidapi-key": RAPIDAPI_KEY,
     "x-rapidapi-host": RAPIDAPI_HOST,
 }
-
-# Categorie Amazon Italia da monitorare
-CATEGORIE = [
-    "electronics",
-    "computers",
-    "videogames",
-    "kitchen",
-    "toys",
-]
 
 # ── Database ──────────────────────────────────────────────────────────────────
 def init_db():
@@ -69,48 +59,39 @@ def segna_pubblicato(asin, titolo, prezzo_attuale, prezzo_originale, sconto):
     conn.commit()
     conn.close()
 
-# ── Axesso API ────────────────────────────────────────────────────────────────
-def cerca_deals(categoria):
-    """Cerca deals su Amazon Italia tramite Axesso"""
-    url = f"https://{RAPIDAPI_HOST}/amz/amazon-search-by-keyword-asin"
+# ── Axesso Deals API ──────────────────────────────────────────────────────────
+def fetch_deals(pagina=1, discount_range="4"):
+    """
+    discountRange valori: 1=fino10%, 2=10-25%, 3=25-50%, 4=oltre50%
+    Usiamo 4 per massimo sconto, poi proviamo anche 3
+    """
+    url = f"https://{RAPIDAPI_HOST}/amz/amazon-search-deals-v2"
     params = {
-        "keyword": f"offerta sconto {categoria}",
         "domainCode": "it",
-        "sortBy": "relevanceblender",
-        "numberOfProducts": "20",
-        "page": "1",
+        "page": str(pagina),
+        "discountRange": discount_range,
     }
     try:
         r = requests.get(url, headers=HEADERS_RAPID, params=params, timeout=15)
-        logger.info(f"Axesso search {categoria}: status {r.status_code}")
+        logger.info(f"Deals API page={pagina} discountRange={discount_range}: status {r.status_code}")
         if r.status_code != 200:
-            logger.error(f"Errore API: {r.text[:200]}")
+            logger.error(f"Errore API: {r.text[:300]}")
             return []
         data = r.json()
-        return data.get("searchProductList", []) or []
-    except Exception as e:
-        logger.error(f"Errore cerca_deals {categoria}: {e}")
-        return []
-
-def cerca_deals_diretti():
-    """Cerca deals diretti dalla pagina offerte Axesso"""
-    url = f"https://{RAPIDAPI_HOST}/amz/amazon-lookup-product"
-    # Cerca prodotti in offerta lampo
-    params = {
-        "url": "https://www.amazon.it/deals",
-        "domainCode": "it",
-    }
-    try:
-        r = requests.get(url, headers=HEADERS_RAPID, params=params, timeout=15)
-        if r.status_code == 200:
-            return r.json().get("products", []) or []
+        logger.info(f"Risposta keys: {list(data.keys())}")
+        # L'endpoint può restituire i deal in campi diversi
+        for campo in ["deals", "dealList", "products", "items", "result", "data"]:
+            if campo in data and data[campo]:
+                logger.info(f"Trovati {len(data[campo])} deal nel campo '{campo}'")
+                return data[campo]
+        logger.info(f"Risposta completa: {str(data)[:500]}")
         return []
     except Exception as e:
-        logger.error(f"Errore deals diretti: {e}")
+        logger.error(f"Errore fetch_deals: {e}")
         return []
 
-def get_dettaglio_prodotto(asin):
-    """Recupera dettagli e prezzo di un prodotto specifico"""
+def get_dettaglio(asin):
+    """Recupera dettagli prodotto tramite ASIN"""
     url = f"https://{RAPIDAPI_HOST}/amz/amazon-lookup-product"
     params = {
         "url": f"https://www.amazon.it/dp/{asin}",
@@ -125,48 +106,76 @@ def get_dettaglio_prodotto(asin):
         logger.error(f"Errore dettaglio {asin}: {e}")
         return None
 
-def estrai_prodotto(item):
-    """Estrae i dati utili da un item dell'API"""
+def parse_prezzo(testo):
+    if not testo:
+        return None
+    import re
+    testo = re.sub(r"[€$£\s,\xa0]", "", str(testo).replace(".", ""))
+    # gestisce formato europeo: 1.299,00 → già rimosso il punto
     try:
-        asin = item.get("asin") or item.get("productAsin", "")
-        if not asin:
+        # prova prima con virgola come decimale
+        testo2 = testo.replace(",", ".")
+        val = float(testo2)
+        return val if 0 < val < 100000 else None
+    except ValueError:
+        return None
+
+def estrai_da_deal(item):
+    """Estrae dati da un oggetto deal dell'API"""
+    try:
+        # Log del primo item per capire la struttura
+        logger.debug(f"Item keys: {list(item.keys()) if isinstance(item, dict) else type(item)}")
+
+        asin = (item.get("asin") or item.get("dealAsin") or
+                item.get("productAsin") or item.get("id", ""))
+        if not asin or len(str(asin)) != 10:
             return None
 
-        titolo = item.get("productTitle") or item.get("title", "")
+        titolo = (item.get("productTitle") or item.get("title") or
+                  item.get("dealTitle") or item.get("name", ""))
         if not titolo:
             return None
-        titolo = titolo[:100]
+        titolo = str(titolo)[:100]
 
         # Prezzo attuale
         prezzo_attuale = None
-        for campo in ["price", "currentPrice", "salePrice", "priceAmount"]:
+        for campo in ["dealPrice", "salePrice", "currentPrice", "price",
+                      "priceAmount", "discountedPrice"]:
             val = item.get(campo)
-            if val:
+            if val is not None:
                 prezzo_attuale = parse_prezzo(str(val))
                 if prezzo_attuale:
                     break
 
         # Prezzo originale
         prezzo_originale = None
-        for campo in ["listPrice", "originalPrice", "wasPrice", "strikethroughPrice"]:
+        for campo in ["listPrice", "originalPrice", "wasPrice",
+                      "strikethroughPrice", "regularPrice", "rrp"]:
             val = item.get(campo)
-            if val:
+            if val is not None:
                 prezzo_originale = parse_prezzo(str(val))
                 if prezzo_originale:
                     break
 
-        # Calcola sconto
+        # Sconto %
         sconto = 0
-        if item.get("savingPercent"):
-            sconto = int(str(item["savingPercent"]).replace("%", "").replace("-", "").strip() or 0)
-        elif prezzo_attuale and prezzo_originale and prezzo_originale > prezzo_attuale:
+        for campo in ["savingPercent", "discountPercent", "discount",
+                      "percentOff", "saving"]:
+            val = item.get(campo)
+            if val is not None:
+                try:
+                    sconto = int(str(val).replace("%", "").replace("-", "").strip())
+                    if sconto > 0:
+                        break
+                except Exception:
+                    pass
+
+        if sconto == 0 and prezzo_attuale and prezzo_originale and prezzo_originale > prezzo_attuale:
             sconto = round((1 - prezzo_attuale / prezzo_originale) * 100)
 
-        if sconto < SOGLIA_SCONTO:
-            return None
-
         # Immagine
-        immagine = item.get("productImage") or item.get("imageUrl") or item.get("imgUrl")
+        immagine = (item.get("productImage") or item.get("imageUrl") or
+                    item.get("imgUrl") or item.get("image"))
 
         return {
             "asin": asin,
@@ -180,37 +189,24 @@ def estrai_prodotto(item):
         logger.debug(f"Errore estrazione: {e}")
         return None
 
-def parse_prezzo(testo):
-    if not testo:
-        return None
-    import re
-    testo = re.sub(r"[€$£\s]", "", str(testo))
-    testo = testo.replace(".", "").replace(",", ".")
-    try:
-        val = float(testo)
-        return val if val > 0 else None
-    except ValueError:
-        return None
-
 # ── Link referral ─────────────────────────────────────────────────────────────
 def build_link(asin):
     return f"https://www.amazon.it/dp/{asin}?tag={AMAZON_PARTNER_TAG}"
 
 # ── Telegram ──────────────────────────────────────────────────────────────────
 def pubblica_telegram(prodotto):
-    titolo = prodotto["titolo"]
-    prezzo_attuale = prodotto["prezzo_attuale"]
-    prezzo_originale = prodotto["prezzo_originale"]
-    sconto = prodotto["sconto"]
-    immagine = prodotto["immagine"]
-    link = build_link(prodotto["asin"])
+    titolo          = prodotto["titolo"]
+    prezzo_attuale  = prodotto["prezzo_attuale"]
+    prezzo_originale= prodotto["prezzo_originale"]
+    sconto          = prodotto["sconto"]
+    immagine        = prodotto["immagine"]
+    link            = build_link(prodotto["asin"])
 
-    prezzo_str = f"€{prezzo_attuale:.2f}" if prezzo_attuale else "Prezzo scontato"
+    prezzo_str    = f"€{prezzo_attuale:.2f}" if prezzo_attuale else "Prezzo scontato"
     originale_str = f"~~€{prezzo_originale:.2f}~~" if prezzo_originale else ""
     risparmio_str = ""
     if prezzo_attuale and prezzo_originale and prezzo_originale > prezzo_attuale:
-        risparmio = prezzo_originale - prezzo_attuale
-        risparmio_str = f"💸 Risparmi *€{risparmio:.2f}*\n"
+        risparmio_str = f"💸 Risparmi *€{prezzo_originale - prezzo_attuale:.2f}*\n"
 
     testo = (
         f"🔥 *OFFERTA AMAZON ITALIA* 🔥\n\n"
@@ -225,21 +221,19 @@ def pubblica_telegram(prodotto):
     url_api = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
     if immagine:
-        payload = {
+        r = requests.post(f"{url_api}/sendPhoto", json={
             "chat_id": TELEGRAM_CHAT_ID,
             "photo": immagine,
             "caption": testo,
             "parse_mode": "Markdown",
-        }
-        r = requests.post(f"{url_api}/sendPhoto", json=payload, timeout=10)
+        }, timeout=10)
     else:
-        payload = {
+        r = requests.post(f"{url_api}/sendMessage", json={
             "chat_id": TELEGRAM_CHAT_ID,
             "text": testo,
             "parse_mode": "Markdown",
             "disable_web_page_preview": False,
-        }
-        r = requests.post(f"{url_api}/sendMessage", json=payload, timeout=10)
+        }, timeout=10)
 
     if r.status_code != 200:
         logger.error(f"Errore Telegram: {r.text}")
@@ -251,40 +245,39 @@ def pubblica_telegram(prodotto):
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
     init_db()
-    logger.info("🚀 Avvio scansione con Axesso RapidAPI...")
+    logger.info("🚀 Avvio scansione con endpoint Deals...")
 
-    prodotti_grezzi = []
+    items_grezzi = []
 
-    for categoria in CATEGORIE:
-        logger.info(f"Scansione: {categoria}")
-        items = cerca_deals(categoria)
-        logger.info(f"  → {len(items)} risultati")
-        prodotti_grezzi.extend(items)
+    # Prende deals con sconto alto (range 4 = >50%) e medio (range 3 = 25-50%)
+    for discount_range in ["4", "3"]:
+        items = fetch_deals(pagina=1, discount_range=discount_range)
+        items_grezzi.extend(items)
+        if items:
+            # Logga il primo item per debug struttura
+            logger.info(f"Esempio item: {str(items[0])[:300]}")
 
-    # Deduplicazione per ASIN
+    logger.info(f"Totale items grezzi: {len(items_grezzi)}")
+
+    # Deduplicazione e estrazione
     visti = set()
     prodotti = []
-    for item in prodotti_grezzi:
-        prodotto = estrai_prodotto(item)
-        if prodotto and prodotto["asin"] not in visti:
-            visti.add(prodotto["asin"])
-            prodotti.append(prodotto)
+    for item in items_grezzi:
+        p = estrai_da_deal(item)
+        if p and p["asin"] not in visti:
+            visti.add(p["asin"])
+            prodotti.append(p)
 
-    logger.info(f"Prodotti con sconto >= {SOGLIA_SCONTO}%: {len(prodotti)}")
+    logger.info(f"Prodotti estratti validi: {len(prodotti)}")
 
     pubblicati = 0
     for prodotto in prodotti:
         if gia_pubblicato(prodotto["asin"]):
-            logger.info(f"Già pubblicato: {prodotto['asin']}")
             continue
-
-        successo = pubblica_telegram(prodotto)
-        if successo:
+        if pubblica_telegram(prodotto):
             segna_pubblicato(
-                prodotto["asin"],
-                prodotto["titolo"],
-                prodotto["prezzo_attuale"],
-                prodotto["prezzo_originale"],
+                prodotto["asin"], prodotto["titolo"],
+                prodotto["prezzo_attuale"], prodotto["prezzo_originale"],
                 prodotto["sconto"],
             )
             pubblicati += 1
