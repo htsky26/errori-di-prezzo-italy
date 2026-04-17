@@ -78,6 +78,7 @@ def cerca_deals(categoria):
         "domainCode": "it",
         "sortBy": "relevanceblender",
         "numberOfProducts": "20",
+        "page": "1",
     }
     try:
         r = requests.get(url, headers=HEADERS_RAPID, params=params, timeout=15)
