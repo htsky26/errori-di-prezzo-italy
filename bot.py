@@ -1,5 +1,7 @@
 
+
 import os
+import re
 import sqlite3
 import requests
 import logging
@@ -21,6 +23,11 @@ HEADERS_RAPID = {
     "x-rapidapi-key": RAPIDAPI_KEY,
     "x-rapidapi-host": RAPIDAPI_HOST,
 }
+
+# Filtri prezzi realistici (esclude dati spazzatura)
+PREZZO_MIN = 3.0       # sotto €3 probabilmente un errore API
+PREZZO_MAX = 3000.0    # sopra €3000 probabilmente un errore API
+SCONTO_MIN = 30        # pubblica solo sconti >= 30%
 
 # ── Database ──────────────────────────────────────────────────────────────────
 def init_db():
@@ -61,10 +68,6 @@ def segna_pubblicato(asin, titolo, prezzo_attuale, prezzo_originale, sconto):
 
 # ── Axesso Deals API ──────────────────────────────────────────────────────────
 def fetch_deals(pagina=1, discount_range="4"):
-    """
-    discountRange valori: 1=fino10%, 2=10-25%, 3=25-50%, 4=oltre50%
-    Usiamo 4 per massimo sconto, poi proviamo anche 3
-    """
     url = f"https://{RAPIDAPI_HOST}/amz/amazon-search-deals-v2"
     params = {
         "domainCode": "it",
@@ -78,54 +81,33 @@ def fetch_deals(pagina=1, discount_range="4"):
             logger.error(f"Errore API: {r.text[:300]}")
             return []
         data = r.json()
-        logger.info(f"Risposta keys: {list(data.keys())}")
-        # L'endpoint può restituire i deal in campi diversi
         for campo in ["deals", "dealList", "products", "items", "result", "data"]:
             if campo in data and data[campo]:
                 logger.info(f"Trovati {len(data[campo])} deal nel campo '{campo}'")
                 return data[campo]
-        logger.info(f"Risposta completa: {str(data)[:500]}")
         return []
     except Exception as e:
         logger.error(f"Errore fetch_deals: {e}")
         return []
 
-def get_dettaglio(asin):
-    """Recupera dettagli prodotto tramite ASIN"""
-    url = f"https://{RAPIDAPI_HOST}/amz/amazon-lookup-product"
-    params = {
-        "url": f"https://www.amazon.it/dp/{asin}",
-        "domainCode": "it",
-    }
-    try:
-        r = requests.get(url, headers=HEADERS_RAPID, params=params, timeout=15)
-        if r.status_code == 200:
-            return r.json()
-        return None
-    except Exception as e:
-        logger.error(f"Errore dettaglio {asin}: {e}")
-        return None
-
+# ── Parsing ───────────────────────────────────────────────────────────────────
 def parse_prezzo(testo):
     if not testo:
         return None
-    import re
-    testo = re.sub(r"[€$£\s,\xa0]", "", str(testo).replace(".", ""))
-    # gestisce formato europeo: 1.299,00 → già rimosso il punto
+    testo = re.sub(r"[€$£\s\xa0]", "", str(testo))
+    # Formato europeo: 1.299,00 → rimuovi punto migliaia, virgola→punto
+    if re.search(r"\d{1,3}\.\d{3},\d{2}", testo):
+        testo = testo.replace(".", "").replace(",", ".")
+    else:
+        testo = testo.replace(",", ".")
     try:
-        # prova prima con virgola come decimale
-        testo2 = testo.replace(",", ".")
-        val = float(testo2)
-        return val if 0 < val < 100000 else None
+        val = float(testo)
+        return val if PREZZO_MIN <= val <= PREZZO_MAX else None
     except ValueError:
         return None
 
 def estrai_da_deal(item):
-    """Estrae dati da un oggetto deal dell'API"""
     try:
-        # Log del primo item per capire la struttura
-        logger.debug(f"Item keys: {list(item.keys()) if isinstance(item, dict) else type(item)}")
-
         asin = (item.get("asin") or item.get("dealAsin") or
                 item.get("productAsin") or item.get("id", ""))
         if not asin or len(str(asin)) != 10:
@@ -135,7 +117,10 @@ def estrai_da_deal(item):
                   item.get("dealTitle") or item.get("name", ""))
         if not titolo:
             return None
-        titolo = str(titolo)[:100]
+        titolo = str(titolo).strip()
+        # Tronca titolo lungo in modo pulito
+        if len(titolo) > 60:
+            titolo = titolo[:57] + "..."
 
         # Prezzo attuale
         prezzo_attuale = None
@@ -173,6 +158,20 @@ def estrai_da_deal(item):
         if sconto == 0 and prezzo_attuale and prezzo_originale and prezzo_originale > prezzo_attuale:
             sconto = round((1 - prezzo_attuale / prezzo_originale) * 100)
 
+        # Scarta se sconto non abbastanza alto
+        if sconto < SCONTO_MIN:
+            return None
+
+        # Scarta se prezzo originale non è credibile
+        # (es. prezzo attuale > prezzo originale, o originale uguale ad attuale)
+        if prezzo_attuale and prezzo_originale:
+            if prezzo_attuale >= prezzo_originale:
+                return None
+            # Scarto se lo sconto calcolato non corrisponde
+            sconto_calcolato = round((1 - prezzo_attuale / prezzo_originale) * 100)
+            if abs(sconto_calcolato - sconto) > 20:
+                sconto = sconto_calcolato
+
         # Immagine
         immagine = (item.get("productImage") or item.get("imageUrl") or
                     item.get("imgUrl") or item.get("image"))
@@ -193,29 +192,47 @@ def estrai_da_deal(item):
 def build_link(asin):
     return f"https://www.amazon.it/dp/{asin}?tag={AMAZON_PARTNER_TAG}"
 
+# ── Emoji sconto ──────────────────────────────────────────────────────────────
+def emoji_sconto(sconto):
+    if sconto >= 70:
+        return "🤯"
+    elif sconto >= 50:
+        return "🔥"
+    elif sconto >= 40:
+        return "⚡"
+    else:
+        return "💰"
+
 # ── Telegram ──────────────────────────────────────────────────────────────────
 def pubblica_telegram(prodotto):
-    titolo          = prodotto["titolo"]
-    prezzo_attuale  = prodotto["prezzo_attuale"]
-    prezzo_originale= prodotto["prezzo_originale"]
-    sconto          = prodotto["sconto"]
-    immagine        = prodotto["immagine"]
-    link            = build_link(prodotto["asin"])
+    titolo           = prodotto["titolo"]
+    prezzo_attuale   = prodotto["prezzo_attuale"]
+    prezzo_originale = prodotto["prezzo_originale"]
+    sconto           = prodotto["sconto"]
+    immagine         = prodotto["immagine"]
+    link             = build_link(prodotto["asin"])
+    emoji            = emoji_sconto(sconto)
 
-    prezzo_str    = f"€{prezzo_attuale:.2f}" if prezzo_attuale else "Prezzo scontato"
-    originale_str = f"~~€{prezzo_originale:.2f}~~" if prezzo_originale else ""
-    risparmio_str = ""
-    if prezzo_attuale and prezzo_originale and prezzo_originale > prezzo_attuale:
-        risparmio_str = f"💸 Risparmi *€{prezzo_originale - prezzo_attuale:.2f}*\n"
+    # Riga prezzi
+    if prezzo_attuale and prezzo_originale:
+        risparmio = prezzo_originale - prezzo_attuale
+        riga_prezzi = (
+            f"💸 ~~€{prezzo_originale:.2f}~~ → *€{prezzo_attuale:.2f}*\n"
+            f"📉 *-{sconto}%* — risparmi *€{risparmio:.2f}*"
+        )
+    elif prezzo_attuale:
+        riga_prezzi = f"💰 *€{prezzo_attuale:.2f}* — sconto *{sconto}%*"
+    else:
+        riga_prezzi = f"🏷 Sconto: *{sconto}%*"
 
     testo = (
-        f"🔥 *OFFERTA AMAZON ITALIA* 🔥\n\n"
-        f"📦 *{titolo}*\n\n"
-        f"{originale_str} → *{prezzo_str}*\n"
-        f"{risparmio_str}"
-        f"🏷 Sconto: *{sconto}%*\n\n"
-        f"🛒 [ACQUISTA ORA]({link})\n\n"
-        f"⚡ _Offerta a tempo limitato!_"
+        f"{emoji} *ERRORE DI PREZZO* {emoji}\n"
+        f"━━━━━━━━━━━━━━━━━━\n\n"
+        f"*{titolo}*\n\n"
+        f"{riga_prezzi}\n\n"
+        f"[🛒 ACQUISTA ORA SU AMAZON]({link})\n\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"⏰ _Offerta a tempo limitato_"
     )
 
     url_api = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
@@ -245,21 +262,15 @@ def pubblica_telegram(prodotto):
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
     init_db()
-    logger.info("🚀 Avvio scansione con endpoint Deals...")
+    logger.info("🚀 Avvio scansione...")
 
     items_grezzi = []
-
-    # Prende deals con sconto alto (range 4 = >50%) e medio (range 3 = 25-50%)
     for discount_range in ["4", "3"]:
         items = fetch_deals(pagina=1, discount_range=discount_range)
         items_grezzi.extend(items)
-        if items:
-            # Logga il primo item per debug struttura
-            logger.info(f"Esempio item: {str(items[0])[:300]}")
 
     logger.info(f"Totale items grezzi: {len(items_grezzi)}")
 
-    # Deduplicazione e estrazione
     visti = set()
     prodotti = []
     for item in items_grezzi:
@@ -268,7 +279,7 @@ def main():
             visti.add(p["asin"])
             prodotti.append(p)
 
-    logger.info(f"Prodotti estratti validi: {len(prodotti)}")
+    logger.info(f"Prodotti validi dopo filtri: {len(prodotti)}")
 
     pubblicati = 0
     for prodotto in prodotti:
