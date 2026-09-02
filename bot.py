@@ -22,12 +22,20 @@ DB_PATH    = "pubblicati.txt"
 
 CATEGORIE = [
     ("Electronics",        "smartphone"),
+    ("Electronics",        "cuffie"),
+    ("Electronics",        "televisore"),
     ("Computers",          "laptop"),
+    ("Computers",          "hard disk"),
     ("VideoGames",         "giochi"),
+    ("VideoGames",         "console"),
     ("HomeAndKitchen",     "cucina"),
+    ("HomeAndKitchen",     "aspirapolvere"),
     ("Apparel",            "maglietta"),
+    ("Apparel",            "scarpe"),
     ("HealthPersonalCare", "vitamina"),
+    ("HealthPersonalCare", "integratori"),
     ("GardenAndOutdoor",   "giardino"),
+    ("GardenAndOutdoor",   "attrezzi"),
 ]
 
 # ── Database leggero ──────────────────────────────────────────────────────────
