@@ -344,6 +344,7 @@ def main():
             salva_pubblicato(prodotto["asin"])
             pubblicati[prodotto["asin"]] = datetime.now()
             nuovi += 1
+            time.sleep(3)  # pausa tra messaggi Telegram
 
     if nuovi > 0:
         commit_database()
