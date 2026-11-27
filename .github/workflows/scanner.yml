@@ -1,0 +1,63 @@
+name: Scanner offerte Amazon
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Installa dipendenze
+        run: pip install -r requirements.txt
+
+      - name: Esegui scanner
+        env:
+          AMAZON_ACCESS_KEY: ${{ secrets.AMAZON_ACCESS_KEY }}
+          AMAZON_SECRET_KEY: ${{ secrets.AMAZON_SECRET_KEY }}
+          AMAZON_PARTNER_TAG: ${{ secrets.AMAZON_PARTNER_TAG }}
+
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+          TELEGRAM_TOKEN_TECH: ${{ secrets.TELEGRAM_TOKEN_TECH }}
+          TELEGRAM_CHAT_ID_TECH: ${{ secrets.TELEGRAM_CHAT_ID_TECH }}
+          TELEGRAM_TOKEN_CASA: ${{ secrets.TELEGRAM_TOKEN_CASA }}
+          TELEGRAM_CHAT_ID_CASA: ${{ secrets.TELEGRAM_CHAT_ID_CASA }}
+          TELEGRAM_TOKEN_ROUTER: ${{ secrets.TELEGRAM_TOKEN_ROUTER }}
+          TELEGRAM_CHAT_ID_ROUTER: ${{ secrets.TELEGRAM_CHAT_ID_ROUTER }}
+          TELEGRAM_TOKEN_3D: ${{ secrets.TELEGRAM_TOKEN_3D }}
+          TELEGRAM_CHAT_ID_3D: ${{ secrets.TELEGRAM_CHAT_ID_3D }}
+          TELEGRAM_TOKEN_CURA: ${{ secrets.TELEGRAM_TOKEN_CURA }}
+          TELEGRAM_CHAT_ID_CURA: ${{ secrets.TELEGRAM_CHAT_ID_CURA }}
+          TELEGRAM_TOKEN_GIARDINO: ${{ secrets.TELEGRAM_TOKEN_GIARDINO }}
+          TELEGRAM_CHAT_ID_GIARDINO: ${{ secrets.TELEGRAM_CHAT_ID_GIARDINO }}
+          TELEGRAM_TOKEN_GIOCHI: ${{ secrets.TELEGRAM_TOKEN_GIOCHI }}
+          TELEGRAM_CHAT_ID_GIOCHI: ${{ secrets.TELEGRAM_CHAT_ID_GIOCHI }}
+          TELEGRAM_TOKEN_ANIMALI: ${{ secrets.TELEGRAM_TOKEN_ANIMALI }}
+          TELEGRAM_CHAT_ID_ANIMALI: ${{ secrets.TELEGRAM_CHAT_ID_ANIMALI }}
+          TELEGRAM_TOKEN_UFFICIO: ${{ secrets.TELEGRAM_TOKEN_UFFICIO }}
+          TELEGRAM_CHAT_ID_UFFICIO: ${{ secrets.TELEGRAM_CHAT_ID_UFFICIO }}
+          TELEGRAM_TOKEN_MUSICA: ${{ secrets.TELEGRAM_TOKEN_MUSICA }}
+          TELEGRAM_CHAT_ID_MUSICA: ${{ secrets.TELEGRAM_CHAT_ID_MUSICA }}
+          TELEGRAM_TOKEN_SPORT: ${{ secrets.TELEGRAM_TOKEN_SPORT }}
+          TELEGRAM_CHAT_ID_SPORT: ${{ secrets.TELEGRAM_CHAT_ID_SPORT }}
+          TELEGRAM_TOKEN_OUTDOOR: ${{ secrets.TELEGRAM_TOKEN_OUTDOOR }}
+          TELEGRAM_CHAT_ID_OUTDOOR: ${{ secrets.TELEGRAM_CHAT_ID_OUTDOOR }}
+        run: python bot.py
+
+      - name: Salva database pubblicati
+        if: always()
+        run: git status --short
